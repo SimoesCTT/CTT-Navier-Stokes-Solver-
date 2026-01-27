@@ -115,7 +115,7 @@ If using this code in research:
 
 Contact
 
-For questions or collaborations: ctt.research.group@gmail.com
+For questions or collaborations: amexsimoes@gmail.com 
 
 ---
 
@@ -290,7 +290,7 @@ Citation
 
 Contact
 
-Research inquiries: ctt.research.group@gmail.com
+Research inquiries: amexsimoes@gmail.com 
 
 ---
 

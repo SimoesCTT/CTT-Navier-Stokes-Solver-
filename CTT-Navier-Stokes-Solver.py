@@ -2,10 +2,13 @@
 CTT Navier-Stokes Spectral Solver
 Implements Convergent Time Theory (CTT) formulation of 3D incompressible NS
 with fractal temporal layers (L=33) and dispersion coefficient α=0.0302011
+
+Copyright (c) 2026 Americo Simoes. All Rights Reserved.
 """
 
 import numpy as np
 import time
+from scipy.fft import fftn, ifftn
 
 class CTT_NavierStokes_Solver:
     """
@@ -36,29 +39,32 @@ class CTT_NavierStokes_Solver:
         # CTT constants
         self.decay_factors = np.exp(-alpha * np.arange(layers))
         
-        # Spectral grid
-        k = np.fft.fftfreq(res, 1/(2*np.pi))
-        self.kx, self.ky, self.kz = np.meshgrid(k, k, k, indexing='ij')
+        # Spectral grid - correct wavenumbers
+        k_vals = np.fft.fftfreq(res) * 2 * np.pi
+        self.kx, self.ky, self.kz = np.meshgrid(k_vals, k_vals, k_vals, indexing='ij')
         self.k_sq = self.kx**2 + self.ky**2 + self.kz**2
         self.k_sq[0,0,0] = 1.0  # Avoid division by zero
+        
+        # Dealias filter (2/3 rule)
+        self.dealias = (np.abs(self.kx) < 2/3) & (np.abs(self.ky) < 2/3) & (np.abs(self.kz) < 2/3)
         
         # Initialize vorticity field (solenoidal in Fourier space)
         self.init_vorticity()
         
     def init_vorticity(self):
         """Initialize divergence-free vorticity field in Fourier space"""
-        # Random initial vorticity
-        w_hat = np.random.randn(self.res, self.res, self.res, 3) + \
-                1j * np.random.randn(self.res, self.res, self.res, 3)
+        # Random initial vorticity (3 components)
+        w_hat = np.random.randn(3, self.res, self.res, self.res) + \
+                1j * np.random.randn(3, self.res, self.res, self.res)
         
         # Project to divergence-free (∇·ω = 0)
-        k_dot_w = (self.kx * w_hat[...,0] + 
-                   self.ky * w_hat[...,1] + 
-                   self.kz * w_hat[...,2])
+        k_dot_w = (self.kx * w_hat[0] + 
+                   self.ky * w_hat[1] + 
+                   self.kz * w_hat[2])
         
-        w_hat[...,0] -= (self.kx / self.k_sq) * k_dot_w
-        w_hat[...,1] -= (self.ky / self.k_sq) * k_dot_w
-        w_hat[...,2] -= (self.kz / self.k_sq) * k_dot_w
+        w_hat[0] -= (self.kx / self.k_sq) * k_dot_w
+        w_hat[1] -= (self.ky / self.k_sq) * k_dot_w
+        w_hat[2] -= (self.kz / self.k_sq) * k_dot_w
         
         self.w_hat = w_hat
         
@@ -68,25 +74,25 @@ class CTT_NavierStokes_Solver:
         Returns Fourier transform of nonlinear term
         """
         # Gradient in physical space
-        grad_w = np.gradient(w_phys, axis=(0,1,2))
+        grad_w = np.gradient(w_phys)
         
         # ω·∇ω in physical space
         nonlinear = np.zeros_like(w_phys)
         for i in range(3):
             for j in range(3):
-                nonlinear[...,i] += w_phys[...,j] * grad_w[j][...,i]
+                nonlinear[i] += w_phys[j] * grad_w[j][i]
         
         # Transform to Fourier space
-        nonlinear_hat = np.fft.fftn(nonlinear, axes=(0,1,2))
+        nonlinear_hat = fftn(nonlinear, axes=(1,2,3))
         
         # Project to divergence-free
-        k_dot_nl = (self.kx * nonlinear_hat[...,0] + 
-                    self.ky * nonlinear_hat[...,1] + 
-                    self.kz * nonlinear_hat[...,2])
+        k_dot_nl = (self.kx * nonlinear_hat[0] + 
+                    self.ky * nonlinear_hat[1] + 
+                    self.kz * nonlinear_hat[2])
         
-        nonlinear_hat[...,0] -= (self.kx / self.k_sq) * k_dot_nl
-        nonlinear_hat[...,1] -= (self.ky / self.k_sq) * k_dot_nl
-        nonlinear_hat[...,2] -= (self.kz / self.k_sq) * k_dot_nl
+        nonlinear_hat[0] -= (self.kx / self.k_sq) * k_dot_nl
+        nonlinear_hat[1] -= (self.ky / self.k_sq) * k_dot_nl
+        nonlinear_hat[2] -= (self.kz / self.k_sq) * k_dot_nl
         
         return nonlinear_hat
     
@@ -96,31 +102,32 @@ class CTT_NavierStokes_Solver:
         ∂ω/∂d + α(ω·∇)ω = α∇²ω
         """
         # Current vorticity in physical space
-        w_phys = np.fft.ifftn(self.w_hat, axes=(0,1,2)).real
+        w_phys = ifftn(self.w_hat, axes=(1,2,3)).real
         
         # Compute nonlinear term
         nl_hat = self.compute_nonlinear_term(w_phys)
         
         # CTT update rule
-        dt = 0.01  # Layer step size
+        dt = 0.05  # Smaller time step for stability
         
         # Right-hand side: -α(ω·∇)ω + α∇²ω
-        rhs_hat = -self.alpha * nl_hat - self.alpha * self.k_sq[...,None] * self.w_hat
+        rhs_hat = -self.alpha * nl_hat - self.alpha * self.k_sq * self.w_hat
         
         # Update vorticity
         self.w_hat += dt * rhs_hat
         
         # Apply CTT energy decay
         self.w_hat *= self.decay_factors[d]
+        self.w_hat *= self.dealias
         
         # Enforce solenoidality
-        k_dot_w = (self.kx * self.w_hat[...,0] + 
-                   self.ky * self.w_hat[...,1] + 
-                   self.kz * self.w_hat[...,2])
+        k_dot_w = (self.kx * self.w_hat[0] + 
+                   self.ky * self.w_hat[1] + 
+                   self.kz * self.w_hat[2])
         
-        self.w_hat[...,0] -= (self.kx / self.k_sq) * k_dot_w
-        self.w_hat[...,1] -= (self.ky / self.k_sq) * k_dot_w
-        self.w_hat[...,2] -= (self.kz / self.k_sq) * k_dot_w
+        self.w_hat[0] -= (self.kx / self.k_sq) * k_dot_w
+        self.w_hat[1] -= (self.ky / self.k_sq) * k_dot_w
+        self.w_hat[2] -= (self.kz / self.k_sq) * k_dot_w
         
     def solve(self, steps_per_layer=10):
         """
@@ -146,8 +153,8 @@ class CTT_NavierStokes_Solver:
                 self.step_layer(d)
             
             # Compute diagnostics
-            w_phys = np.fft.ifftn(self.w_hat, axes=(0,1,2)).real
-            vort_mag = np.sqrt(np.sum(w_phys**2, axis=-1))
+            w_phys = ifftn(self.w_hat, axes=(1,2,3)).real
+            vort_mag = np.sqrt(np.sum(w_phys**2, axis=0))
             max_vort.append(np.max(vort_mag))
             
             # CTT energy E(d) = 1/2 ∫|ω|² dx
